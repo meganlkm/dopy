@@ -9,9 +9,16 @@ import os
 import sys
 import pprint
 import requests
-import json as json_module
+from json import dumps
 
 API_ENDPOINT = 'https://api.digitalocean.com'
+
+REQUEST_FUNCS ={
+    'POST': requests.post,
+    'DELETE': requests.delete,
+    'PUT': requests.put,
+    'GET': requests.get
+}
 
 
 class DoError(RuntimeError):
@@ -19,8 +26,44 @@ class DoError(RuntimeError):
 
 
 class ApiMixin(object):
-    _client_id = None
-    _api_key = None
+    client_id = None
+    api_key = None
+
+    @property
+    def droplets(self):
+        return '/droplets'
+
+    def droplets_url(self, droplet_id=None, action=None):
+        url = self.droplets
+        if droplet_id:
+            url = '{0}/{1}'.format(url, droplet_id)
+        if action:
+            url = '{0}/{1}'.format(url, action)
+        return url
+
+    def request(self, url, method='GET', timeout=60, *args, **kwargs):
+        try:
+            response = REQUEST_FUNCS[method](url, timeout=timeout, **kwargs)
+        except KeyError:
+            raise DoError('Unsupported method {0}'.format(method))
+        except Exception as e:
+            raise e
+
+        try:
+            response_json = response.json()
+        except ValueError:
+            raise ValueError("The API server doesn't respond with a valid json")
+
+        if response.status_code != requests.codes.ok:
+            if response_json:
+                if 'error_message' in response_json:
+                    raise DoError(response_json['error_message'])
+                elif 'message' in response_json:
+                    raise DoError(response_json['message'])
+            # The JSON reponse is bad, so raise an exception with the HTTP status
+            response.raise_for_status()
+
+        return response_json
 
 
 class ApiV1Mixin(ApiMixin):
@@ -29,12 +72,64 @@ class ApiV1Mixin(ApiMixin):
     def endpoint(self):
         return '{}/v1'.format(API_ENDPOINT)
 
+    def prepare_request_params(self, params=None, *args, **kwargs):
+        if params is None:
+            params = dict()
+        return {'params': params}
+
+    def parse_response(self, response_json):
+        if response_json.get('status') != 'OK':
+            raise DoError(response_json['error_message'])
+        return response_json
+
+    def parse_droplets(self, response):
+        return response['droplets']
+
 
 class ApiV2Mixin(ApiMixin):
 
     @property
     def endpoint(self):
         return '{}/v2'.format(API_ENDPOINT)
+
+    def prepare_request_params(self, method='GET', params=None,
+                               headers=None, *args, **kwargs):
+        if params is None:
+            params = dict()
+
+        request_params = {'headers': headers}
+        param_key = 'data' if method == 'POST' else 'params'
+
+        request_params['headers'] = dict() if headers is None else headers
+        request_params[param_key] = params if method != 'POST' else dumps(params)
+
+        request_params['headers']['Authorization'] = 'Bearer {0}'.format(self.api_key)
+        request_params['headers']['Content-Type'] = 'application/json'
+
+        return request_params
+
+    def parse_response(self, response_json):
+        if response_json.get('id') == 'not_found':
+            raise DoError(response_json['message'])
+
+        return response_json
+
+    def parse_droplet(self, response):
+        droplet = response['droplet']
+        try:
+            droplet[u'ip_address'] = droplet['networks']['v4'][0]['ip_address']
+        except IndexError:
+            droplet[u'ip_address'] = ''
+        return droplet
+
+    def parse_droplets(self, response):
+        if 'droplets' in response:
+            for droplet in response['droplets']:
+                try:
+                    droplet[u'ip_address'] = droplet['networks']['v4'][0]['ip_address']
+                except IndexError:
+                    droplet[u'ip_address'] = ''
+        return response['droplets']
 
 
 class DoManager(object):
@@ -47,10 +142,14 @@ class DoManager(object):
         else:
             raise DoError('Invalid API Version')
 
-        self.client_id = client_id
-        self.api_key = api_key
-
+        self.api.client_id = client_id
+        self.api.api_key = api_key
         self.api_version = int(api_version)
+
+    def request(self, path, *args, **kwargs):
+        request_params = self.api.prepare_request_params(*args, **kwargs)
+        response = self.api.request(self.gen_url(path), **request_params)
+        return self.api.parse_response(response)
 
     def gen_url(self, path):
         if not path.startswith('/'):
@@ -58,14 +157,12 @@ class DoManager(object):
         return self.api.endpoint + path
 
     def all_active_droplets(self):
-        response = self.request('/droplets/')
-        if self.api_version == 2:
-            for index in range(len(response['droplets'])):
-                try:
-                    response['droplets'][index][u'ip_address'] = response['droplets'][index]['networks']['v4'][0]['ip_address']
-                except IndexError:
-                    response['droplets'][index][u'ip_address'] = ''
-        return response['droplets']
+        response = self.request(self.api.droplets_url())
+        return self.api.parse_droplets(response)
+
+    def show_droplet(self, droplet_id):
+        response = self.request(self.api.droplets_url(droplet_id))
+        return self.api.parse_droplet(response)
 
     def new_droplet(self, name, size_id, image_id, region_id,
                     ssh_key_ids=None, virtio=True, private_networking=False,
@@ -117,15 +214,6 @@ class DoManager(object):
 
             response = self.request('/droplets/new', params=params)
             return response['droplet']
-
-    def show_droplet(self, droplet_id):
-        response = self.request('/droplets/%s' % droplet_id)
-        if self.api_version == 2:
-            try:
-                response['droplet'][u'ip_address'] = response['droplet']['networks']['v4'][0]['ip_address']
-            except IndexError:
-                response['droplet'][u'ip_address'] = ''
-        return response['droplet']
 
     def droplet_v2_action(self, droplet_id, droplet_type, params=None):
         if params is None:
@@ -443,90 +531,22 @@ class DoManager(object):
         json = self.request('/events/%s' % event_id)
         return json['event']
 
-#low_level========================================
-    def request(self, path, params={}, method='GET'):
-        url = self.gen_url(path)
-
-        if self.api_version == 2:
-            headers = {'Authorization': "Bearer %s" % self.api_key}
-            resp = self.request_v2(url, params=params, headers=headers, method=method)
-        else:
-            params['client_id'] = self.client_id
-            params['api_key'] = self.api_key
-            resp = self.request_v1(url, params, method=method)
-
-        return resp
-
-    def request_v1(self, url, params={}, method='GET'):
-        try:
-            resp = requests.get(url, params=params, timeout=60)
-            json = resp.json()
-        except ValueError:  # requests.models.json.JSONDecodeError
-            raise ValueError("The API server doesn't respond with a valid json")
-        except requests.RequestException as e:  # errors from requests
-            raise RuntimeError(e)
-
-        if resp.status_code != requests.codes.ok:
-            if json:
-                if 'error_message' in json:
-                    raise DoError(json['error_message'])
-                elif 'message' in json:
-                    raise DoError(json['message'])
-            # The JSON reponse is bad, so raise an exception with the HTTP status
-            resp.raise_for_status()
-        if json.get('status') != 'OK':
-            raise DoError(json['error_message'])
-
-        return json
-
-    def request_v2(self, url, headers={}, params={}, method='GET'):
-        headers['Content-Type'] = 'application/json'
-        try:
-            if method == 'POST':
-                resp = requests.post(url, data=json_module.dumps(params), headers=headers, timeout=60)
-                json = resp.json()
-            elif method == 'DELETE':
-                resp = requests.delete(url, headers=headers, timeout=60)
-                json = {'status': resp.status_code}
-            elif method == 'PUT':
-                resp = requests.put(url, headers=headers, params=params, timeout=60)
-                json = resp.json()
-            elif method == 'GET':
-                resp = requests.get(url, headers=headers, params=params, timeout=60)
-                json = resp.json()
-            else:
-                raise DoError('Unsupported method %s' % method)
-
-        except ValueError:  # requests.models.json.JSONDecodeError
-            raise ValueError("The API server doesn't respond with a valid json")
-        except requests.RequestException as e:  # errors from requests
-            raise RuntimeError(e)
-
-        if resp.status_code != requests.codes.ok:
-            if json:
-                if 'error_message' in json:
-                    raise DoError(json['error_message'])
-                elif 'message' in json:
-                    raise DoError(json['message'])
-            # The JSON reponse is bad, so raise an exception with the HTTP status
-            resp.raise_for_status()
-
-        if json.get('id') == 'not_found':
-            raise DoError(json['message'])
-
-        return json
-
 
 if __name__ == '__main__':
     api_version = os.environ.get('DO_API_VERSION')
     api_key = os.environ.get('DO_API_TOKEN') or os.environ.get('DO_API_KEY')
     client_id = os.environ.get('DO_CLIENT_ID')
 
+    print api_key
+
     if not all([api_version, api_key]):
         print 'Required DO environment variables are not set.'
         sys.exit(1)
 
     do = DoManager(client_id, api_key, int(api_version))
+
+    print do.api.endpoint
+    # print do.api.droplets_url(234234)
 
     fname = sys.argv[1]
     print fname
