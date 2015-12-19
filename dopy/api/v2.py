@@ -5,14 +5,10 @@ This module simply sends request to the Digital Ocean API,
 and returns their response as a dict.
 """
 
-import os
-import sys
-import pprint
 from requests import codes, RequestException
+from dopy import API_TOKEN, API_ENDPOINT
 from dopy import common as c
 from dopy.exceptions import DoError
-
-API_ENDPOINT = 'https://api.digitalocean.com/v2'
 
 REQUEST_METHODS = {
     'POST': c.post_request,
@@ -22,46 +18,73 @@ REQUEST_METHODS = {
 }
 
 
-def request_v2(url, headers=None, params=None, timeout=60, method='GET'):
-    if method not in REQUEST_METHODS.keys():
-        raise DoError('Unsupported method %s' % method)
+class ApiRequest(object):
 
-    request_args = {
-        'url': url,
-        'headers': headers,
-        'params': params,
-        'timeout': timeout
-    }
+    def __init__(self, uri=None, headers=None, params=None,
+                 timeout=60, method='GET'):
+        self.set_url(uri)
+        self.set_headers(headers)
+        self.params = params
+        self.timeout = timeout
+        self.method = method
+        self.response = None
+        self._verify_method()
 
-    try:
-        resp = REQUEST_METHODS[method](**request_args)
-        response = resp.json()
-    except ValueError:
-        raise ValueError("The API server doesn't respond with a valid json")
-    except RequestException as e:
-        raise RuntimeError(e)
+    def set_headers(self, headers):
+        self.headers = {} if not isinstance(headers, dict) else headers
+        self.headers['Authorization'] = "Bearer %s" % API_TOKEN
 
-    if resp.status_code != codes.ok:
-        if response:
-            if 'error_message' in response:
-                raise DoError(response['error_message'])
-            elif 'message' in response:
-                raise DoError(response['message'])
-        # The JSON reponse is bad, so raise an exception with the HTTP status
-        resp.raise_for_status()
+    def set_url(self, uri):
+        if uri is None:
+            uri = '/'
+        if not uri.startswith('/'):
+            uri = '/' + uri
+        self.url = '{}/v2{}'.format(API_ENDPOINT, uri)
 
-    if response.get('id') == 'not_found':
-        raise DoError(response['message'])
-    return response
+    def _verify_method(self):
+        if self.method not in REQUEST_METHODS.keys():
+            raise DoError('Unsupported method %s' % self.method)
+
+    def _verify_status_code(self):
+        if self.response.status_code != codes.ok:
+            try:
+                if 'error_message' in self.response:
+                    raise DoError(self.response['error_message'])
+                elif 'message' in self.response:
+                    raise DoError(self.response['message'])
+            except:
+                # The JSON reponse is bad, so raise an exception with the HTTP status
+                self.response.raise_for_status()
+
+    def _verify_response_id(self):
+        response = self.response.json()
+        if response.get('id') == 'not_found':
+            raise DoError(response['message'])
+
+    def run(self):
+        try:
+            self.response = REQUEST_METHODS[self.method](self.url, self.params, self.headers, self.timeout)
+        except ValueError:
+            raise ValueError("The API server doesn't respond with a valid json")
+        except RequestException as e:
+            raise RuntimeError(e)
+
+        self._verify_status_code()
+        self._verify_response_id()
+        return self.response.json()
 
 
-class DoManager(object):
+class DoApiV2Base(object):
 
-    def __init__(self, client_id, api_key, api_version=1):
+    def request(self, path, params={}, method='GET'):
+        api = ApiRequest(path, params=params, method=method)
+        return api.run()
+
+
+class DoManager(DoApiV2Base):
+
+    def __init__(self):
         self.api_endpoint = API_ENDPOINT
-        self.client_id = client_id
-        self.api_key = api_key
-        self.api_version = int(api_version)
 
     def all_active_droplets(self):
         json = self.request('/droplets/')
@@ -263,14 +286,34 @@ class DoManager(object):
         json = self.request('/sizes/')
         return json['sizes']
 
-    # domains==========================================
     def all_domains(self):
+        return DoApiDomains().list()
+
+    def new_domain(self, name, ip):
+        return DoApiDomains().create(name, ip)
+
+    # events(actions in v2 API)========================
+    def show_all_actions(self):
+        json = self.request('/actions')
+        return json['actions']
+
+    def show_action(self, action_id):
+        json = self.request('/actions/%s' % action_id)
+        return json['action']
+
+    def show_event(self, event_id):
+        return self.show_action(event_id)
+
+
+class DoApiDomains(DoApiV2Base):
+
+    def list(self):
         json = self.request('/domains/')
         return json['domains']
 
-    def new_domain(self, name, ip):
-        params = {'name': name, 'ip_address': ip}
-        json = self.request('/domains', params=params, method='POST')
+    def create(self, name, ip):
+        json = self.request('/domains', method='POST',
+                            params={'name': name, 'ip_address': ip})
         return json['domain']
 
     def show_domain(self, domain_id):
@@ -316,35 +359,3 @@ class DoManager(object):
     def destroy_domain_record(self, domain_id, record_id):
         self.request('/domains/%s/records/%s' % (domain_id, record_id), method='DELETE')
         return True
-
-    # events(actions in v2 API)========================
-    def show_all_actions(self):
-        json = self.request('/actions')
-        return json['actions']
-
-    def show_action(self, action_id):
-        json = self.request('/actions/%s' % action_id)
-        return json['action']
-
-    def show_event(self, event_id):
-        return self.show_action(event_id)
-
-    # low_level========================================
-    def request(self, path, params={}, method='GET'):
-        if not path.startswith('/'):
-            path = '/' + path
-        url = API_ENDPOINT + path
-
-        headers = {'Authorization': "Bearer %s" % self.api_key}
-        return request_v2(url, params=params, headers=headers, timeout=60, method=method)
-
-
-if __name__ == '__main__':
-    api_token = os.environ.get('DO_API_TOKEN') or os.environ['DO_API_KEY']
-    print "api_token: {}".format(api_token)
-    do = DoManager(None, api_token, 2)
-
-    fname = sys.argv[1]
-
-    # size_id: 66, image_id: 1601, region_id: 1
-    pprint.pprint(getattr(do, fname)(*sys.argv[2:]))

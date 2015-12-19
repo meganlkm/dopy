@@ -4,19 +4,22 @@ from six import wraps
 
 
 class MockResponse(object):
-    def __init__(self, method, url, params, headers, timeout):
+    def __init__(self, method=None, url=None, params=None, headers=None,
+                 timeout=None, data=None):
         self.url = url
         self.method = method
         self.params = params
         self.headers = headers
         self.timeout = timeout
+        self.data = data
         self.status_code = 200
+        self.id = '12345'
+        self.droplets = []
+        self.domains = []
+        self.domain = {}
 
     def json(self):
-        return {'url': self.url, 'id': '12345',
-                'method': self.method, 'params': self.params,
-                'headers': self.headers, 'timeout': self.timeout,
-                'droplets': []}
+        return self.__dict__
 
 
 def _compile_request_args(params, headers, timeout):
