@@ -8,47 +8,57 @@ and returns their response as a dict.
 import os
 import sys
 import pprint
-import requests
-import json as json_module
-from six import wraps
+from requests import codes, RequestException
+from dopy import common as c
 
 API_ENDPOINT = 'https://api.digitalocean.com/v2'
+
+REQUEST_METHODS = {
+    'POST': c.post_request,
+    'PUT': c.put_request,
+    'DELETE': c.delete_request,
+    'GET': c.get_request,
+}
 
 
 class DoError(RuntimeError):
     pass
 
 
-def paginated(func):
-    @wraps(func)
-    def wrapper(self, url, headers=None, params=None, method='GET'):
-        if method != 'GET':
-            return func(self, url, headers, params, method)
+def request_v2(url, headers=None, params=None, timeout=60, method='GET'):
+    if method not in REQUEST_METHODS.keys():
+        raise DoError('Unsupported method %s' % method)
 
-        nxt = url
-        out = {}
+    request_args = {
+        'url': url,
+        'headers': headers,
+        'params': params,
+        'timeout': timeout
+    }
 
-        while nxt is not None:
-            result = func(self, nxt, headers, params, 'GET')
-            nxt = None
+    try:
+        resp = REQUEST_METHODS[method](**request_args)
+        response = resp.json()
+    except ValueError:
+        raise ValueError("The API server doesn't respond with a valid json")
+    except RequestException as e:
+        raise RuntimeError(e)
 
-            if isinstance(result, dict):
-                for key, value in result.items():
-                    if key in out and isinstance(out[key], list):
-                        out[key].extend(value)
-                    else:
-                        out[key] = value
+    if resp.status_code != codes.ok:
+        if response:
+            if 'error_message' in response:
+                raise DoError(response['error_message'])
+            elif 'message' in response:
+                raise DoError(response['message'])
+        # The JSON reponse is bad, so raise an exception with the HTTP status
+        resp.raise_for_status()
 
-                if 'links' in result \
-                        and 'pages' in result['links'] \
-                        and 'next' in result['links']['pages']:
-                    nxt = result['links']['pages']['next']
-
-        return out
-    return wrapper
+    if response.get('id') == 'not_found':
+        raise DoError(response['message'])
+    return response
 
 
-class DoManager(object):
+class DoManagerV2(object):
 
     def __init__(self, client_id, api_key, api_version=1):
         self.api_endpoint = API_ENDPOINT
@@ -326,60 +336,16 @@ class DoManager(object):
     def request(self, path, params={}, method='GET'):
         if not path.startswith('/'):
             path = '/' + path
-        url = self.api_endpoint + path
+        url = API_ENDPOINT + path
 
         headers = {'Authorization': "Bearer %s" % self.api_key}
-        return self.request_v2(url, params=params, headers=headers, method=method)
-
-    @paginated
-    def request_v2(self, url, headers=None, params=None, method='GET'):
-        if headers is None:
-            headers = {}
-
-        if params is None:
-            params = {}
-
-        headers['Content-Type'] = 'application/json'
-
-        try:
-            if method == 'POST':
-                resp = requests.post(url, data=json_module.dumps(params), headers=headers, timeout=60)
-                json = resp.json()
-            elif method == 'DELETE':
-                resp = requests.delete(url, headers=headers, timeout=60)
-                json = {'status': resp.status_code}
-            elif method == 'PUT':
-                resp = requests.put(url, headers=headers, params=params, timeout=60)
-                json = resp.json()
-            elif method == 'GET':
-                resp = requests.get(url, headers=headers, params=params, timeout=60)
-                json = resp.json()
-            else:
-                raise DoError('Unsupported method %s' % method)
-
-        except ValueError:  # requests.models.json.JSONDecodeError
-            raise ValueError("The API server doesn't respond with a valid json")
-        except requests.RequestException as e:  # errors from requests
-            raise RuntimeError(e)
-
-        if resp.status_code != requests.codes.ok:
-            if json:
-                if 'error_message' in json:
-                    raise DoError(json['error_message'])
-                elif 'message' in json:
-                    raise DoError(json['message'])
-            # The JSON reponse is bad, so raise an exception with the HTTP status
-            resp.raise_for_status()
-
-        if json.get('id') == 'not_found':
-            raise DoError(json['message'])
-
-        return json
+        return request_v2(url, params=params, headers=headers, timeout=60, method=method)
 
 
 if __name__ == '__main__':
     api_token = os.environ.get('DO_API_TOKEN') or os.environ['DO_API_KEY']
-    do = DoManager(None, api_token, 2)
+    print "api_token: {}".format(api_token)
+    do = DoManagerV2(None, api_token, 2)
 
     fname = sys.argv[1]
 
