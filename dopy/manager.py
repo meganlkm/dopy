@@ -5,168 +5,69 @@ This module simply sends request to the Digital Ocean API,
 and returns their response as a dict.
 """
 
-import os
-import sys
-import pprint
 import requests
-from json import dumps
+import json as json_module
+from six import wraps
 
 API_ENDPOINT = 'https://api.digitalocean.com'
-
-REQUEST_FUNCS ={
-    'POST': requests.post,
-    'DELETE': requests.delete,
-    'PUT': requests.put,
-    'GET': requests.get
-}
-
 
 class DoError(RuntimeError):
     pass
 
 
-class ApiMixin(object):
-    client_id = None
-    api_key = None
+def paginated(func):
+    @wraps(func)
+    def wrapper(self, url, headers=None, params=None, method='GET'):
+        if method != 'GET':
+            return func(self, url, headers, params, method)
 
-    @property
-    def droplets(self):
-        return '/droplets'
+        nxt = url
+        out = {}
 
-    def droplets_url(self, droplet_id=None, action=None):
-        url = self.droplets
-        if droplet_id:
-            url = '{0}/{1}'.format(url, droplet_id)
-        if action:
-            url = '{0}/{1}'.format(url, action)
-        return url
+        while nxt is not None:
+            result = func(self, nxt, headers, params, 'GET')
+            nxt = None
 
-    def request(self, url, method='GET', timeout=60, *args, **kwargs):
-        try:
-            response = REQUEST_FUNCS[method](url, timeout=timeout, **kwargs)
-        except KeyError:
-            raise DoError('Unsupported method {0}'.format(method))
-        except Exception as e:
-            raise e
+            if isinstance(result, dict):
+                for key, value in result.items():
+                    if key in out and isinstance(out[key], list):
+                        out[key].extend(value)
+                    else:
+                        out[key] = value
 
-        try:
-            response_json = response.json()
-        except ValueError:
-            raise ValueError("The API server doesn't respond with a valid json")
+                if 'links' in result \
+                        and 'pages' in result['links'] \
+                        and 'next' in result['links']['pages']:
+                    nxt = result['links']['pages']['next']
 
-        if response.status_code != requests.codes.ok:
-            if response_json:
-                if 'error_message' in response_json:
-                    raise DoError(response_json['error_message'])
-                elif 'message' in response_json:
-                    raise DoError(response_json['message'])
-            # The JSON reponse is bad, so raise an exception with the HTTP status
-            response.raise_for_status()
-
-        return response_json
-
-
-class ApiV1Mixin(ApiMixin):
-
-    @property
-    def endpoint(self):
-        return '{}/v1'.format(API_ENDPOINT)
-
-    def prepare_request_params(self, params=None, *args, **kwargs):
-        if params is None:
-            params = dict()
-        return {'params': params}
-
-    def parse_response(self, response_json):
-        if response_json.get('status') != 'OK':
-            raise DoError(response_json['error_message'])
-        return response_json
-
-    def parse_droplets(self, response):
-        return response['droplets']
-
-
-class ApiV2Mixin(ApiMixin):
-
-    @property
-    def endpoint(self):
-        return '{}/v2'.format(API_ENDPOINT)
-
-    def prepare_request_params(self, method='GET', params=None,
-                               headers=None, *args, **kwargs):
-        if params is None:
-            params = dict()
-
-        request_params = {'headers': headers}
-        param_key = 'data' if method == 'POST' else 'params'
-
-        request_params['headers'] = dict() if headers is None else headers
-        request_params[param_key] = params if method != 'POST' else dumps(params)
-
-        request_params['headers']['Authorization'] = 'Bearer {0}'.format(self.api_key)
-        request_params['headers']['Content-Type'] = 'application/json'
-
-        return request_params
-
-    def parse_response(self, response_json):
-        if response_json.get('id') == 'not_found':
-            raise DoError(response_json['message'])
-
-        return response_json
-
-    def parse_droplet(self, response):
-        droplet = response['droplet']
-        try:
-            droplet[u'ip_address'] = droplet['networks']['v4'][0]['ip_address']
-        except IndexError:
-            droplet[u'ip_address'] = ''
-        return droplet
-
-    def parse_droplets(self, response):
-        if 'droplets' in response:
-            for droplet in response['droplets']:
-                try:
-                    droplet[u'ip_address'] = droplet['networks']['v4'][0]['ip_address']
-                except IndexError:
-                    droplet[u'ip_address'] = ''
-        return response['droplets']
+        return out
+    return wrapper
 
 
 class DoManager(object):
 
     def __init__(self, client_id, api_key, api_version=1):
-        if api_version == 1:
-            self.api = ApiV1Mixin()
-        elif api_version == 2:
-            self.api = ApiV2Mixin()
-        else:
-            raise DoError('Invalid API Version')
-
-        self.api.client_id = client_id
-        self.api.api_key = api_key
+        self.api_endpoint = API_ENDPOINT
+        self.client_id = client_id
+        self.api_key = api_key
         self.api_version = int(api_version)
 
-    def request(self, path, *args, **kwargs):
-        request_params = self.api.prepare_request_params(*args, **kwargs)
-        response = self.api.request(self.gen_url(path), **request_params)
-        return self.api.parse_response(response)
-
-    def gen_url(self, path):
-        if not path.startswith('/'):
-            path = '/{}'.format(path)
-        return self.api.endpoint + path
+        if self.api_version == 2:
+            self.api_endpoint += '/v2'
+        if self.api_version == 1:
+            self.api_endpoint += '/v1'
 
     def all_active_droplets(self):
-        response = self.request(self.api.droplets_url())
-        return self.api.parse_droplets(response)
-
-    def show_droplet(self, droplet_id):
-        response = self.request(self.api.droplets_url(droplet_id))
-        return self.api.parse_droplet(response)
+        json = self.request('/droplets/')
+        if self.api_version == 2:
+            for index in range(len(json['droplets'])):
+                self.populate_droplet_ips(json['droplets'][index])
+        return json['droplets']
 
     def new_droplet(self, name, size_id, image_id, region_id,
-                    ssh_key_ids=None, virtio=True, private_networking=False,
-                    backups_enabled=False, user_data=None, ipv6=False):
+            ssh_key_ids=None, virtio=True, private_networking=False,
+            backups_enabled=False, user_data=None, ipv6=False):
+
         if self.api_version == 2:
             params = {
                 'name': str(name),
@@ -192,10 +93,10 @@ class DoManager(object):
             if user_data:
                 params['user_data'] = user_data
 
-            response = self.request('/droplets', params=params, method='POST')
-            created_id = response['droplet']['id']
-            response = self.show_droplet(created_id)
-            return response
+            json = self.request('/droplets', params=params, method='POST')
+            created_id = json['droplet']['id']
+            json = self.show_droplet(created_id)
+            return json
         else:
             params = {
                 'name': str(name),
@@ -212,92 +113,98 @@ class DoManager(object):
                     ssh_key_ids = ','.join(ssh_key_ids)
                 params['ssh_key_ids'] = ssh_key_ids
 
-            response = self.request('/droplets/new', params=params)
-            return response['droplet']
+            json = self.request('/droplets/new', params=params)
+            return json['droplet']
+
+    def show_droplet(self, droplet_id):
+        json = self.request('/droplets/%s' % droplet_id)
+        if self.api_version == 2:
+            self.populate_droplet_ips(json['droplet'])
+        return json['droplet']
 
     def droplet_v2_action(self, droplet_id, droplet_type, params=None):
         if params is None:
             params = {}
         params['type'] = droplet_type
-        response = self.request('/droplets/%s/actions' % droplet_id, params=params, method='POST')
-        return response
+        json = self.request('/droplets/%s/actions' % droplet_id, params=params, method='POST')
+        return json
 
     def reboot_droplet(self, droplet_id):
         if self.api_version == 2:
-            response = self.droplet_v2_action(droplet_id, 'reboot')
+            json = self.droplet_v2_action(droplet_id, 'reboot')
         else:
-            response = self.request('/droplets/%s/reboot/' % droplet_id)
-        response.pop('status', None)
-        return response
+            json = self.request('/droplets/%s/reboot/' % droplet_id)
+        json.pop('status', None)
+        return json
 
     def power_cycle_droplet(self, droplet_id):
         if self.api_version == 2:
-            response = self.droplet_v2_action(droplet_id, 'power_cycle')
+            json = self.droplet_v2_action(droplet_id, 'power_cycle')
         else:
-            response = self.request('/droplets/%s/power_cycle/' % droplet_id)
-        response.pop('status', None)
-        return response
+            json = self.request('/droplets/%s/power_cycle/' % droplet_id)
+        json.pop('status', None)
+        return json
 
     def shutdown_droplet(self, droplet_id):
         if self.api_version == 2:
-            response = self.droplet_v2_action(droplet_id, 'shutdown')
+            json = self.droplet_v2_action(droplet_id, 'shutdown')
         else:
-            response = self.request('/droplets/%s/shutdown/' % droplet_id)
-        response.pop('status', None)
-        return response
+            json = self.request('/droplets/%s/shutdown/' % droplet_id)
+        json.pop('status', None)
+        return json
 
     def power_off_droplet(self, droplet_id):
         if self.api_version == 2:
-            response = self.droplet_v2_action(droplet_id, 'power_off')
+            json = self.droplet_v2_action(droplet_id, 'power_off')
         else:
-            response = self.request('/droplets/%s/power_off/' % droplet_id)
-        response.pop('status', None)
-        return response
+            json = self.request('/droplets/%s/power_off/' % droplet_id)
+        json.pop('status', None)
+        return json
 
     def power_on_droplet(self, droplet_id):
         if self.api_version == 2:
-            response = self.droplet_v2_action(droplet_id, 'power_on')
+            json = self.droplet_v2_action(droplet_id, 'power_on')
         else:
-            response = self.request('/droplets/%s/power_on/' % droplet_id)
-        response.pop('status', None)
-        return response
+            json = self.request('/droplets/%s/power_on/' % droplet_id)
+        json.pop('status', None)
+        return json
 
     def password_reset_droplet(self, droplet_id):
         if self.api_version == 2:
-            response = self.droplet_v2_action(droplet_id, 'password_reset')
+            json = self.droplet_v2_action(droplet_id, 'password_reset')
         else:
-            response = self.request('/droplets/%s/password_reset/' % droplet_id)
-        response.pop('status', None)
-        return response
+            json = self.request('/droplets/%s/password_reset/' % droplet_id)
+        json.pop('status', None)
+        return json
 
     def resize_droplet(self, droplet_id, size_id):
         if self.api_version == 2:
             params = {'size': size_id}
-            response = self.droplet_v2_action(droplet_id, 'resize', params)
+            json = self.droplet_v2_action(droplet_id, 'resize', params)
         else:
             params = {'size_id': size_id}
-            response = self.request('/droplets/%s/resize/' % droplet_id, params)
-        response.pop('status', None)
-        return response
+            json = self.request('/droplets/%s/resize/' % droplet_id, params)
+        json.pop('status', None)
+        return json
 
     def snapshot_droplet(self, droplet_id, name):
         params = {'name': name}
         if self.api_version == 2:
-            response = self.droplet_v2_action(droplet_id, 'snapshot', params)
+            json = self.droplet_v2_action(droplet_id, 'snapshot', params)
         else:
-            response = self.request('/droplets/%s/snapshot/' % droplet_id, params)
-        response.pop('status', None)
-        return response
+            json = self.request('/droplets/%s/snapshot/' % droplet_id, params)
+        json.pop('status', None)
+        return json
 
     def restore_droplet(self, droplet_id, image_id):
         if self.api_version == 2:
             params = {'image': image_id}
-            response = self.droplet_v2_action(droplet_id, 'restore', params)
+            json = self.droplet_v2_action(droplet_id, 'restore', params)
         else:
             params = {'image_id': image_id}
-            response = self.request('/droplets/%s/restore/' % droplet_id, params)
-        response.pop('status', None)
-        return response
+            json = self.request('/droplets/%s/restore/' % droplet_id, params)
+        json.pop('status', None)
+        return json
 
     def rebuild_droplet(self, droplet_id, image_id):
         if self.api_version == 2:
@@ -343,6 +250,15 @@ class DoManager(object):
         json.pop('status', None)
         return json
 
+    def populate_droplet_ips(self, droplet):
+        droplet[u'ip_address'] = ''
+        for networkIndex in range(len(droplet['networks']['v4'])):
+            network = droplet['networks']['v4'][networkIndex]
+            if network['type'] == 'public':
+                droplet[u'ip_address'] = network['ip_address']
+            if network['type'] == 'private':
+                droplet[u'private_ip_address'] = network['ip_address']
+
 #regions==========================================
     def all_regions(self):
         json = self.request('/regions/')
@@ -353,6 +269,15 @@ class DoManager(object):
         params = {'filter': filter}
         json = self.request('/images/', params)
         return json['images']
+
+    def private_images(self):
+        if self.api_version == 2:
+            json = self.request('/images?private=true')
+            return json['images']
+        else:
+            params = {'filter': 'my_images'}
+            json = self.request('/images/', params)
+            return json['images']
 
     def image_v2_action(self, image_id, image_type, params=None):
         if params is None:
@@ -531,24 +456,101 @@ class DoManager(object):
         json = self.request('/events/%s' % event_id)
         return json['event']
 
+#low_level========================================
+    def request(self, path, params={}, method='GET'):
+        if not path.startswith('/'):
+            path = '/'+path
+        url = self.api_endpoint+path
+
+        if self.api_version == 2:
+            headers = {'Authorization': "Bearer %s" % self.api_key}
+            resp = self.request_v2(url, params=params, headers=headers, method=method)
+        else:
+            params['client_id'] = self.client_id
+            params['api_key'] = self.api_key
+            resp = self.request_v1(url, params, method=method)
+
+        return resp
+
+    def request_v1(self, url, params={}, method='GET'):
+        try:
+            resp = requests.get(url, params=params, timeout=60)
+            json = resp.json()
+        except ValueError:  # requests.models.json.JSONDecodeError
+            raise ValueError("The API server doesn't respond with a valid json")
+        except requests.RequestException as e:  # errors from requests
+            raise RuntimeError(e)
+
+        if resp.status_code != requests.codes.ok:
+            if json:
+                if 'error_message' in json:
+                    raise DoError(json['error_message'])
+                elif 'message' in json:
+                    raise DoError(json['message'])
+            # The JSON reponse is bad, so raise an exception with the HTTP status
+            resp.raise_for_status()
+        if json.get('status') != 'OK':
+            raise DoError(json['error_message'])
+
+        return json
+
+    @paginated
+    def request_v2(self, url, headers=None, params=None, method='GET'):
+        if headers is None:
+            headers = {}
+
+        if params is None:
+            params = {}
+
+        headers['Content-Type'] = 'application/json'
+
+        try:
+            if method == 'POST':
+                resp = requests.post(url, data=json_module.dumps(params), headers=headers, timeout=60)
+                json = resp.json()
+            elif method == 'DELETE':
+                resp = requests.delete(url, headers=headers, timeout=60)
+                json = {'status': resp.status_code}
+            elif method == 'PUT':
+                resp = requests.put(url, headers=headers, params=params, timeout=60)
+                json = resp.json()
+            elif method == 'GET':
+                resp = requests.get(url, headers=headers, params=params, timeout=60)
+                json = resp.json()
+            else:
+                raise DoError('Unsupported method %s' % method)
+
+        except ValueError:  # requests.models.json.JSONDecodeError
+            raise ValueError("The API server doesn't respond with a valid json")
+        except requests.RequestException as e:  # errors from requests
+            raise RuntimeError(e)
+
+        if resp.status_code != requests.codes.ok:
+            if json:
+                if 'error_message' in json:
+                    raise DoError(json['error_message'])
+                elif 'message' in json:
+                    raise DoError(json['message'])
+            # The JSON reponse is bad, so raise an exception with the HTTP status
+            resp.raise_for_status()
+
+        if json.get('id') == 'not_found':
+            raise DoError(json['message'])
+
+        return json
+
 
 if __name__ == '__main__':
-    api_version = os.environ.get('DO_API_VERSION')
-    api_key = os.environ.get('DO_API_TOKEN') or os.environ.get('DO_API_KEY')
-    client_id = os.environ.get('DO_CLIENT_ID')
-
-    print api_key
-
-    if not all([api_version, api_key]):
-        print 'Required DO environment variables are not set.'
-        sys.exit(1)
-
-    do = DoManager(client_id, api_key, int(api_version))
-
-    print do.api.endpoint
-    # print do.api.droplets_url(234234)
-
+    import os
+    if os.environ.get('DO_API_VERSION') == '2':
+        api_token = os.environ.get('DO_API_TOKEN') or os.environ['DO_API_KEY']
+        do = DoManager(None, api_token, 2)
+    else:
+        client_id = os.environ['DO_CLIENT_ID']
+        api_key = os.environ['DO_API_KEY']
+        do = DoManager(client_id, api_key, 1)
+    import sys
     fname = sys.argv[1]
-    print fname
+    import pprint
     # size_id: 66, image_id: 1601, region_id: 1
     pprint.pprint(getattr(do, fname)(*sys.argv[2:]))
