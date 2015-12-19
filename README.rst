@@ -7,13 +7,13 @@ Installation
 ============
 
 .. code-block:: bash
-    
+
     # pip install dopy
 
 Getting Started
 ===============
 
-To interact with Digital Ocean, you first need .. a digital ocean account with 
+To interact with Digital Ocean, you first need .. a digital ocean account with
 valid API keys.
 
 Keys can be set either as Env variables, or within the code.
@@ -34,7 +34,7 @@ For API v.2.
 For API v.1.
 
 .. code-block:: bash
-    
+
     # export DO_CLIENT_ID='client_id'
     # export DO_API_KEY='long_api_key'
 
@@ -68,8 +68,17 @@ sizes, images and datacenters; ex.
 
     >>> do.show_domain('exapmle.com')
     >>> do.new_droplet('new_droplet', '512mb', 'lamp', 'ams2')
-                                    
 
+
+
+Tests
+=====
+
+Run tests:
+
+```bash
+./run_tests.sh
+```
 
 TODO
 ====

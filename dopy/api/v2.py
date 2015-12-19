@@ -80,6 +80,15 @@ class DoApiV2Base(object):
         api = ApiRequest(path, params=params, method=method)
         return api.run()
 
+    @classmethod
+    def get_endpoint(cls, pathlist=None, trailing_slash=False):
+        if pathlist is None:
+            pathlist = []
+        pathlist.insert(0, cls.endpoint)
+        if trailing_slash:
+            pathlist.append('')
+        return '/'.join(pathlist)
+
 
 class DoManager(DoApiV2Base):
 
@@ -292,6 +301,9 @@ class DoManager(DoApiV2Base):
     def new_domain(self, name, ip):
         return DoApiDomains().create(name, ip)
 
+    def show_domain(self, domain_id):
+        return DoApiDomains().show(domain_id)
+
     # events(actions in v2 API)========================
     def show_all_actions(self):
         json = self.request('/actions')
@@ -307,21 +319,24 @@ class DoManager(DoApiV2Base):
 
 class DoApiDomains(DoApiV2Base):
 
+    endpoint = '/domains'
+
     def list(self):
-        json = self.request('/domains/')
+        json = self.request(self.get_endpoint(trailing_slash=True))
         return json['domains']
 
     def create(self, name, ip):
-        json = self.request('/domains', method='POST',
+        json = self.request(self.get_endpoint(), method='POST',
                             params={'name': name, 'ip_address': ip})
         return json['domain']
 
-    def show_domain(self, domain_id):
-        json = self.request('/domains/%s/' % domain_id)
+    def show(self, domain_id):
+        json = self.request(self.get_endpoint([domain_id], trailing_slash=True))
         return json['domain']
 
     def destroy_domain(self, domain_id):
-        self.request('/domains/%s' % domain_id, method='DELETE')
+        self.request(self.get_endpoint([domain_id]), method='DELETE')
+        # TODO
         return True
 
     def all_domain_records(self, domain_id):
