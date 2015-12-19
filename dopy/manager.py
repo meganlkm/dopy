@@ -15,9 +15,14 @@ if __name__ == '__main__':
         from dopy.api.v1 import DoManager
         from dopy import CLIENT_ID, API_KEY
         do = DoManager(CLIENT_ID, API_KEY, 1)
+        fname = sys.argv[1]
+        pprint.pprint(getattr(do, fname)(*sys.argv[2:]))
     else:
         from dopy.api.v2 import DoManager
         do = DoManager()
+        fname = sys.argv[1]
 
-    fname = sys.argv[1]
-    pprint.pprint(getattr(do, fname)(*sys.argv[2:]))
+        try:
+            pprint.pprint(do.retro_execution(fname, *sys.argv[2:]))
+        except:
+            pprint.pprint(getattr(do, fname)(*sys.argv[2:]))

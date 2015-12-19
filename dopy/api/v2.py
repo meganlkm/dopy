@@ -95,16 +95,124 @@ class DoManager(DoApiV2Base):
     def __init__(self):
         self.api_endpoint = API_ENDPOINT
 
-    def all_active_droplets(self):
-        json = self.request('/droplets/')
+    def retro_execution(self, method_name, *args, **kwargs):
+        retrometh = {
+            "all_active_droplets": DoApiDroplets().list,
+            "new_droplet": DoApiDroplets().create,
+            "show_droplet": DoApiDroplets().show_droplet,
+            "droplet_v2_action": DoApiDroplets().droplet_v2_action,
+            "reboot_droplet": DoApiDroplets().reboot_droplet,
+            "power_cycle_droplet": DoApiDroplets().power_cycle_droplet,
+            "shutdown_droplet": DoApiDroplets().shutdown_droplet,
+            "power_off_droplet": DoApiDroplets().power_off_droplet,
+            "power_on_droplet": DoApiDroplets().power_on_droplet,
+            "password_reset_droplet": DoApiDroplets().password_reset_droplet,
+            "resize_droplet": DoApiDroplets().resize_droplet,
+            "snapshot_droplet": DoApiDroplets().snapshot_droplet,
+            "restore_droplet": DoApiDroplets().restore_droplet,
+            "rebuild_droplet": DoApiDroplets().rebuild_droplet,
+            "enable_backups_droplet": DoApiDroplets().enable_backups_droplet,
+            "disable_backups_droplet": DoApiDroplets().disable_backups_droplet,
+            "rename_droplet": DoApiDroplets().rename_droplet,
+            "destroy_droplet": DoApiDroplets().destroy_droplet,
+            "populate_droplet_ips": DoApiDroplets().populate_droplet_ips,
+            "all_domains": DoApiDomains().list,
+            "new_domain": DoApiDomains().create,
+            "show_domain": DoApiDomains().show,
+        }
+        return retrometh[method_name](*args, **kwargs)
+
+    # regions==========================================
+    def all_regions(self):
+        json = self.request('/regions/')
+        return json['regions']
+
+    # images==========================================
+    def all_images(self, filter='global'):
+        params = {'filter': filter}
+        json = self.request('/images/', params)
+        return json['images']
+
+    def private_images(self):
+        json = self.request('/images?private=true')
+        return json['images']
+
+    def image_v2_action(self, image_id, image_type, params=None):
+        if params is None:
+            params = {}
+        params['type'] = image_type
+        json = self.request('/images/%s/actions' % image_id, params=params, method='POST')
+        return json
+
+    def show_image(self, image_id):
+        json = self.request('/images/%s' % image_id)
+        return json['image']
+
+    def destroy_image(self, image_id):
+        self.request('/images/%s' % image_id, method='DELETE')
+        return True
+
+    def transfer_image(self, image_id, region_id):
+        params = {'region': region_id}
+        json = self.image_v2_action(image_id, 'transfer', params)
+        json.pop('status', None)
+        return json
+
+    # ssh_keys=========================================
+    def all_ssh_keys(self):
+        json = self.request('/account/keys')
+        return json['ssh_keys']
+
+    def new_ssh_key(self, name, pub_key):
+        params = {'name': name, 'public_key': pub_key}
+        json = self.request('/account/keys', params, method='POST')
+        return json['ssh_key']
+
+    def show_ssh_key(self, key_id):
+        json = self.request('/account/keys/%s/' % key_id)
+        return json['ssh_key']
+
+    def edit_ssh_key(self, key_id, name, pub_key):
+        # v2 API doesn't allow to change key body now
+        params = {'name': name}
+        json = self.request('/account/keys/%s/' % key_id, params, method='PUT')
+        return json['ssh_key']
+
+    def destroy_ssh_key(self, key_id):
+        self.request('/account/keys/%s' % key_id, method='DELETE')
+        return True
+
+    # sizes============================================
+    def sizes(self):
+        json = self.request('/sizes/')
+        return json['sizes']
+
+    # events(actions in v2 API)========================
+    def show_all_actions(self):
+        json = self.request('/actions')
+        return json['actions']
+
+    def show_action(self, action_id):
+        json = self.request('/actions/%s' % action_id)
+        return json['action']
+
+    def show_event(self, event_id):
+        return self.show_action(event_id)
+
+
+class DoApiDroplets(DoApiV2Base):
+
+    endpoint = '/droplets'
+
+    def list(self):
+        json = self.request(self.get_endpoint(trailing_slash=True))
         for index in range(len(json['droplets'])):
             self.populate_droplet_ips(json['droplets'][index])
         return json['droplets']
 
-    def new_droplet(self, name, size_id, image_id, region_id,
-                    ssh_key_ids=None, virtio=True, private_networking=False,
-                    backups_enabled=False, user_data=None, ipv6=False):
-
+    def create(self, name, size_id, image_id, region_id,
+               ssh_key_ids=None, virtio=True, private_networking=False,
+               backups_enabled=False, user_data=None, ipv6=False):
         params = {
             'name': str(name),
             'size': str(size_id),
@@ -120,7 +228,7 @@ class DoManager(DoApiV2Base):
             if isinstance(ssh_key_ids, basestring):
                 ssh_key_ids = [ssh_key_ids]
 
-            if type(ssh_key_ids) == list:
+            if isinstance(ssh_key_ids, list):
                 for index in range(len(ssh_key_ids)):
                     ssh_key_ids[index] = str(ssh_key_ids[index])
 
@@ -129,13 +237,13 @@ class DoManager(DoApiV2Base):
         if user_data:
             params['user_data'] = user_data
 
-        json = self.request('/droplets', params=params, method='POST')
+        json = self.request(self.get_endpoint(), params=params, method='POST')
         created_id = json['droplet']['id']
         json = self.show_droplet(created_id)
         return json
 
     def show_droplet(self, droplet_id):
-        json = self.request('/droplets/%s' % droplet_id)
+        json = self.request(self.get_endpoint([droplet_id]))
         self.populate_droplet_ips(json['droplet'])
         return json['droplet']
 
@@ -143,8 +251,7 @@ class DoManager(DoApiV2Base):
         if params is None:
             params = {}
         params['type'] = droplet_type
-        json = self.request('/droplets/%s/actions' % droplet_id, params=params, method='POST')
-        return json
+        return self.request(self.get_endpoint([droplet_id, 'actions']), params=params, method='POST')
 
     def reboot_droplet(self, droplet_id):
         json = self.droplet_v2_action(droplet_id, 'reboot')
@@ -217,7 +324,7 @@ class DoManager(DoApiV2Base):
         return json
 
     def destroy_droplet(self, droplet_id, scrub_data=True):
-        json = self.request('/droplets/%s' % droplet_id, method='DELETE')
+        json = self.request(self.get_endpoint([droplet_id]), method='DELETE')
         json.pop('status', None)
         return json
 
@@ -229,92 +336,6 @@ class DoManager(DoApiV2Base):
                 droplet[u'ip_address'] = network['ip_address']
             if network['type'] == 'private':
                 droplet[u'private_ip_address'] = network['ip_address']
-
-    # regions==========================================
-    def all_regions(self):
-        json = self.request('/regions/')
-        return json['regions']
-
-    # images==========================================
-    def all_images(self, filter='global'):
-        params = {'filter': filter}
-        json = self.request('/images/', params)
-        return json['images']
-
-    def private_images(self):
-        json = self.request('/images?private=true')
-        return json['images']
-
-    def image_v2_action(self, image_id, image_type, params=None):
-        if params is None:
-            params = {}
-        params['type'] = image_type
-        json = self.request('/images/%s/actions' % image_id, params=params, method='POST')
-        return json
-
-    def show_image(self, image_id):
-        json = self.request('/images/%s' % image_id)
-        return json['image']
-
-    def destroy_image(self, image_id):
-        self.request('/images/%s' % image_id, method='DELETE')
-        return True
-
-    def transfer_image(self, image_id, region_id):
-        params = {'region': region_id}
-        json = self.image_v2_action(image_id, 'transfer', params)
-        json.pop('status', None)
-        return json
-
-    # ssh_keys=========================================
-    def all_ssh_keys(self):
-        json = self.request('/account/keys')
-        return json['ssh_keys']
-
-    def new_ssh_key(self, name, pub_key):
-        params = {'name': name, 'public_key': pub_key}
-        json = self.request('/account/keys', params, method='POST')
-        return json['ssh_key']
-
-    def show_ssh_key(self, key_id):
-        json = self.request('/account/keys/%s/' % key_id)
-        return json['ssh_key']
-
-    def edit_ssh_key(self, key_id, name, pub_key):
-        # v2 API doesn't allow to change key body now
-        params = {'name': name}
-        json = self.request('/account/keys/%s/' % key_id, params, method='PUT')
-        return json['ssh_key']
-
-    def destroy_ssh_key(self, key_id):
-        self.request('/account/keys/%s' % key_id, method='DELETE')
-        return True
-
-    # sizes============================================
-    def sizes(self):
-        json = self.request('/sizes/')
-        return json['sizes']
-
-    def all_domains(self):
-        return DoApiDomains().list()
-
-    def new_domain(self, name, ip):
-        return DoApiDomains().create(name, ip)
-
-    def show_domain(self, domain_id):
-        return DoApiDomains().show(domain_id)
-
-    # events(actions in v2 API)========================
-    def show_all_actions(self):
-        json = self.request('/actions')
-        return json['actions']
-
-    def show_action(self, action_id):
-        json = self.request('/actions/%s' % action_id)
-        return json['action']
-
-    def show_event(self, event_id):
-        return self.show_action(event_id)
 
 
 class DoApiDomains(DoApiV2Base):
